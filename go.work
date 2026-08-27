@@ -2,5 +2,6 @@ go 1.26.6
 
 use (
 	./ingestion
+	./shared
 	./stream-processor
 )

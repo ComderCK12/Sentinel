@@ -1,0 +1,6 @@
+.idea/
+*.iml
+
+# stray local build binaries at repo root
+/server
+/worker

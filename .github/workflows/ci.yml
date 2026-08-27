@@ -16,17 +16,20 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.26.6'
           cache-dependency-path: |
-            ingestion/go.sum
-            stream-processor/go.sum
-            decision-service/go.sum
+            go.work.sum
+            **/go.sum
 
+      # go.work's root isn't itself a module, so `./...` from here doesn't
+      # resolve — build/vet each module go.work lists explicitly. Update
+      # this list if go.work's `use` block changes (e.g. decission-service
+      # gets scaffolded).
       - name: Build all services (workspace-aware)
-        run: go build ./...
+        run: go build ./ingestion/... ./shared/... ./stream-processor/...
 
       - name: Vet
-        run: go vet ./...
+        run: go vet ./ingestion/... ./shared/... ./stream-processor/...
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
