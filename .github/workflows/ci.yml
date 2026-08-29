@@ -38,6 +38,12 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+          # install-mode: binary (the action's default) downloads golangci-lint's
+          # prebuilt release binary, built with whatever Go version upstream used
+          # at release time — that lagged behind our go-version (1.26.6) and
+          # broke type-checking. goinstall builds it with the toolchain this
+          # workflow just set up instead, keeping the two in sync.
+          install-mode: goinstall
           args: --timeout=5m ./decision-service/... ./ingestion/... ./shared/... ./stream-processor/...
 
   python:
