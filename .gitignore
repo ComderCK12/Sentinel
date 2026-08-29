@@ -1,6 +1,10 @@
 .idea/
 *.iml
 
-# stray local build binaries at repo root
+# local build output
+/bin/
+
+# stray local build binaries
 /server
 /worker
+/stream-processor/worker
