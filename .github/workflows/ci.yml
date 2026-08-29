@@ -34,15 +34,20 @@ jobs:
       # Same root-isn't-a-module issue as build/vet above: golangci-lint's
       # default `./...` doesn't resolve from the workspace root either, so
       # it needs the same explicit module list.
+      # golangci-lint-action@v6's goinstall/binary paths are both hardcoded to
+      # golangci-lint's pre-v2 Go module path (github.com/.../cmd/golangci-lint,
+      # no /v2/) — confirmed in its bundled source, literally marked
+      # "TODO: it should be updated for v2". With version: latest that silently
+      # installs a v1.x binary, which then rejects our v2-schema .golangci.yml
+      # ("additional properties 'version', 'formatters' not allowed"). v9 fixed
+      # this (goinstall now targets .../v2/cmd/golangci-lint).
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
-          # install-mode: binary (the action's default) downloads golangci-lint's
-          # prebuilt release binary, built with whatever Go version upstream used
-          # at release time — that lagged behind our go-version (1.26.6) and
-          # broke type-checking. goinstall builds it with the toolchain this
-          # workflow just set up instead, keeping the two in sync.
+          # goinstall builds using the Go toolchain this workflow already set
+          # up (1.26.6), instead of binary mode's prebuilt release asset which
+          # may lag behind on the Go version it was built with.
           install-mode: goinstall
           args: --timeout=5m ./decision-service/... ./ingestion/... ./shared/... ./stream-processor/...
 
