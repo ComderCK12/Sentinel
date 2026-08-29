@@ -1,6 +1,7 @@
 go 1.26.6
 
 use (
+	./decision-service
 	./ingestion
 	./shared
 	./stream-processor
