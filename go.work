@@ -3,6 +3,7 @@ go 1.26.6
 use (
 	./decision-service
 	./ingestion
+	./loadgen
 	./shared
 	./stream-processor
 )

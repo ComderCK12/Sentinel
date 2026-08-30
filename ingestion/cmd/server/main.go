@@ -12,12 +12,15 @@ import (
 	"time"
 
 	"github.com/ComderCK12/Sentinel/ingestion/internal/api"
+	"github.com/ComderCK12/Sentinel/ingestion/internal/idempotency"
 	"github.com/ComderCK12/Sentinel/ingestion/internal/producer"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
-	serviceName = "ingestion"
-	defaultPort = "8080"
+	serviceName    = "ingestion"
+	defaultPort    = "8080"
+	idempotencyTTL = 24 * time.Hour
 )
 
 func main() {
@@ -25,11 +28,29 @@ func main() {
 
 	port := getEnv("PORT", defaultPort)
 	brokers := strings.Split(getEnv("KAFKA_BROKERS", "localhost:19092"), ",")
+	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
 
 	prod := producer.New(brokers)
 	defer prod.Close()
 
-	eventHandler := api.NewEventHandler(prod, logger)
+	// Short, no-retry timeouts: this client only ever serves the idempotency
+	// fast-path check, which is meant to fail open quickly if Redis is slow
+	// or unreachable. A plain context.WithTimeout on the call site isn't
+	// enough on its own — go-redis binds its blocking socket I/O to these
+	// client-level timeouts (several seconds by default) rather than to a
+	// deadline passed into an individual command, and its default retry
+	// count multiplies that further.
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:         redisAddr,
+		DialTimeout:  300 * time.Millisecond,
+		ReadTimeout:  300 * time.Millisecond,
+		WriteTimeout: 300 * time.Millisecond,
+		MaxRetries:   -1,
+	})
+	defer redisClient.Close()
+	idem := idempotency.New(redisClient, idempotencyTTL)
+
+	eventHandler := api.NewEventHandler(prod, idem, logger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)

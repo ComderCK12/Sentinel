@@ -26,10 +26,10 @@ jobs:
       # this list if go.work's `use` block changes (e.g. decision-service
       # gets scaffolded).
       - name: Build all services (workspace-aware)
-        run: go build ./decision-service/... ./ingestion/... ./shared/... ./stream-processor/...
+        run: go build ./decision-service/... ./ingestion/... ./loadgen/... ./shared/... ./stream-processor/...
 
       - name: Vet
-        run: go vet ./decision-service/... ./ingestion/... ./shared/... ./stream-processor/...
+        run: go vet ./decision-service/... ./ingestion/... ./loadgen/... ./shared/... ./stream-processor/...
 
       # Same root-isn't-a-module issue as build/vet above: golangci-lint's
       # default `./...` doesn't resolve from the workspace root either, so
@@ -49,7 +49,7 @@ jobs:
           # up (1.26.6), instead of binary mode's prebuilt release asset which
           # may lag behind on the Go version it was built with.
           install-mode: goinstall
-          args: --timeout=5m ./decision-service/... ./ingestion/... ./shared/... ./stream-processor/...
+          args: --timeout=5m ./decision-service/... ./ingestion/... ./loadgen/... ./shared/... ./stream-processor/...
 
   python:
     name: Python lint
