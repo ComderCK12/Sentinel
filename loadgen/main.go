@@ -85,27 +85,26 @@ func buildEvents(n int, dupRate float64) []shared.Event {
 
 	runID := time.Now().UnixNano()
 	events := make([]shared.Event, 0, n)
-	uniqueIDs := make([]string, 0, uniqueCount)
+	uniqueEvents := make([]shared.Event, 0, uniqueCount)
 
 	for i := 0; i < uniqueCount; i++ {
-		id := fmt.Sprintf("loadgen-%d-%d", runID, i)
-		uniqueIDs = append(uniqueIDs, id)
-		events = append(events, shared.Event{
-			EventID:  id,
+		e := shared.Event{
+			EventID:  fmt.Sprintf("loadgen-%d-%d", runID, i),
 			UserID:   fmt.Sprintf("user-%d", i%50),
 			Amount:   roundAmount(rand.Float64() * 20000),
 			Currency: "USD",
-		})
+		}
+		uniqueEvents = append(uniqueEvents, e)
+		events = append(events, e)
 	}
 
+	// A duplicate re-sends the exact same body as its original, not just
+	// the same event_id — that's what a real client retry looks like, and
+	// it's what makes the ON CONFLICT DO NOTHING backstop test meaningful:
+	// if the two competing inserts carried different amount/user_id, which
+	// one "wins" the race would be arbitrary rather than provably correct.
 	for i := 0; i < dupCount; i++ {
-		id := uniqueIDs[rand.Intn(len(uniqueIDs))]
-		events = append(events, shared.Event{
-			EventID:  id,
-			UserID:   fmt.Sprintf("user-%d", i%50),
-			Amount:   roundAmount(rand.Float64() * 20000),
-			Currency: "USD",
-		})
+		events = append(events, uniqueEvents[rand.Intn(len(uniqueEvents))])
 	}
 
 	rand.Shuffle(len(events), func(i, j int) {

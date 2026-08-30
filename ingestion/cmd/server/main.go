@@ -42,9 +42,9 @@ func main() {
 	// count multiplies that further.
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:         redisAddr,
-		DialTimeout:  300 * time.Millisecond,
-		ReadTimeout:  300 * time.Millisecond,
-		WriteTimeout: 300 * time.Millisecond,
+		DialTimeout:  idempotency.CheckTimeout,
+		ReadTimeout:  idempotency.CheckTimeout,
+		WriteTimeout: idempotency.CheckTimeout,
 		MaxRetries:   -1,
 	})
 	defer redisClient.Close()

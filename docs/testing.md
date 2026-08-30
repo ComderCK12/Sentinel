@@ -173,3 +173,54 @@ correctness guarantee: `decisions.event_id` is `PRIMARY KEY`, and
 `store.SaveDecision` writes with `INSERT ... ON CONFLICT (event_id) DO
 NOTHING`, so even total loss of the fast path can't produce a duplicate
 decision.
+
+### Test: a failed Kafka publish doesn't permanently swallow the event
+
+Found by code review, not by the manual pass above — the original
+`MarkIfNew` call claimed the Redis key *before* the Kafka publish was
+confirmed, with nothing to undo that claim if the publish then failed. A
+client retrying the same `event_id` (the standard response to a `500`) would
+find the key already claimed and get told `"duplicate"` — silently dropping
+an event that was never actually processed, for up to the 24h TTL. The
+Postgres backstop above doesn't help here: it only prevents a duplicate
+*decision* once an event reaches Kafka twice, and does nothing when an event
+never reaches Kafka at all.
+
+**Steps:**
+```bash
+docker stop sentinel-redpanda   # simulate Kafka being unreachable
+
+curl -i -m 10 -X POST localhost:8080/v1/events -H "Content-Type: application/json" \
+  -d '{"event_id":"release_test_1","user_id":"u1","amount":50,"currency":"USD"}'
+# expect: 500 {"error":"failed to accept event"}
+
+docker start sentinel-redpanda
+# decision-service's Kafka connection doesn't survive the broker restart —
+# restart it too before continuing:
+#   pkill -f bin/decision-service && go build -o bin/decision-service ./decision-service/cmd/server
+#   POSTGRES_DSN=... KAFKA_BROKERS=localhost:19092 ./bin/decision-service &
+
+# retry the exact same event_id
+curl -i -m 10 -X POST localhost:8080/v1/events -H "Content-Type: application/json" \
+  -d '{"event_id":"release_test_1","user_id":"u1","amount":50,"currency":"USD"}'
+
+docker exec -it sentinel-postgres psql -U sentinel -d sentinel \
+  -c "select event_id, decision from decisions where event_id='release_test_1';"
+```
+
+**Expected:** the retry returns `202 {"status":"accepted"}` — **not**
+`"duplicate"` — and a row for `release_test_1` shows up in Postgres.
+
+**Fix:** added `idempotency.Checker.Release` (a plain `DEL` on the claimed
+key) and wired it into the handler: if `producer.Publish` fails after a
+successful claim, the claim is released before returning the error, so a
+retry gets a real second attempt instead of a false "duplicate". Best-effort
+— if the release call itself fails, the claim just lives out its TTL, which
+costs a spurious duplicate response on retry (an availability hit), not
+silent event loss (a correctness bug) like before the fix.
+
+**Actually run:** confirmed `500` on the first send while Redpanda was
+stopped, `202 accepted` (not `duplicate`) on the retry after it came back,
+and the row present in Postgres with `decision = 'allow'`. Also re-ran the
+full 1,000-event loadgen proof afterward to confirm no regression: baseline
+2707 → 3607 after the run (delta 900, exact match), zero errors.

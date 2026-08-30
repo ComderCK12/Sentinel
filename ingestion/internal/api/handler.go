@@ -5,20 +5,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/ComderCK12/Sentinel/ingestion/internal/idempotency"
 	"github.com/ComderCK12/Sentinel/ingestion/internal/producer"
 	"github.com/ComderCK12/Sentinel/shared"
 )
-
-// idempotencyCheckTimeout bounds the Redis fast-path check independently of
-// the caller's own context. Without this, a hung (not just down) Redis
-// blocks the request for as long as the client is willing to wait, which
-// defeats "fail open" — a dependency that's merely slow should degrade
-// ingestion's latency by a bounded amount, not by however long it takes the
-// caller to give up.
-const idempotencyCheckTimeout = 300 * time.Millisecond
 
 type EventHandler struct {
 	producer    *producer.Producer
@@ -52,9 +43,12 @@ func (h *EventHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	// unique constraint on event_id is what actually guarantees no
 	// duplicate decision ever gets recorded; this just avoids the wasted
 	// Kafka publish + consumer round trip for the common case.
-	idemCtx, cancel := context.WithTimeout(r.Context(), idempotencyCheckTimeout)
+	idemCtx, cancel := context.WithTimeout(r.Context(), idempotency.CheckTimeout)
 	isNew, err := h.idempotency.MarkIfNew(idemCtx, event.EventID)
 	cancel()
+
+	claimed := err == nil && isNew
+
 	if err != nil {
 		h.logger.Error("idempotency check failed, publishing anyway", "event_id", event.EventID, "error", err)
 	} else if !isNew {
@@ -70,6 +64,19 @@ func (h *EventHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.producer.Publish(r.Context(), &event); err != nil {
 		h.logger.Error("failed to publish event", "event_id", event.EventID, "error", err)
+		// The claim we made above said "this event is being handled" —
+		// it wasn't. Release it so a client retry of the same event_id
+		// (the expected response to a 500) gets a real attempt instead of
+		// being told "duplicate" for work that never happened. Best-effort:
+		// on release failure the claim just lives out its TTL, which costs
+		// spurious duplicate responses on retry, not silent event loss.
+		if claimed {
+			releaseCtx, releaseCancel := context.WithTimeout(context.Background(), idempotency.CheckTimeout)
+			if releaseErr := h.idempotency.Release(releaseCtx, event.EventID); releaseErr != nil {
+				h.logger.Error("failed to release idempotency claim after publish failure", "event_id", event.EventID, "error", releaseErr)
+			}
+			releaseCancel()
+		}
 		writeError(w, http.StatusInternalServerError, "failed to accept event")
 		return
 	}
