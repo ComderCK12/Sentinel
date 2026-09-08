@@ -27,8 +27,8 @@ Three layers: **ingestion** (Go + Kafka) → **stream processing + ML serving** 
 ## Project status
 
 - [x] Phase 0 — foundations & local dev environment
-- [x] Phase 1 — core pipeline (ingestion → Kafka → decision, dummy rule)
-- [ ] Phase 2 — real-time feature computation
+- [x] Phase 1 — core pipeline (ingestion → Kafka → decision, dummy rule, idempotency)
+- [ ] Phase 2 — feature engineering & data layer *(in progress — task 1 of 4)*
 - [ ] Phase 3 — ML model training & serving
 - [ ] Phase 4 — model integration with fallback logic
 - [ ] Phase 5 — Kubernetes deployment
@@ -36,6 +36,8 @@ Three layers: **ingestion** (Go + Kafka) → **stream processing + ML serving** 
 - [ ] Phase 7 — observability
 - [ ] Phase 8 — load & chaos testing
 - [ ] Phase 9 — documentation & demo polish
+
+Full task-level breakdown per phase: [`docs/build-plan.md`](docs/build-plan.md).
 
 ## Getting started
 
