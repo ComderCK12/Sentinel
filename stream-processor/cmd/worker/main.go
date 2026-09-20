@@ -7,22 +7,44 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/ComderCK12/Sentinel/stream-processor/internal/consumer"
+	"github.com/ComderCK12/Sentinel/stream-processor/internal/store"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
 	serviceName = "stream-processor"
-	defaultPort = "8081"
+	defaultPort = "8084"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = defaultPort
-	}
+	port := getEnv("PORT", defaultPort)
+	brokers := strings.Split(getEnv("KAFKA_BROKERS", "localhost:19092"), ",")
+	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Plain defaults here, deliberately not idempotency.CheckTimeout's tight
+	// fail-fast config: nothing on this path is blocking an HTTP response,
+	// and unlike ingestion's fast-path check, Redis is the only copy of
+	// this state (see store package doc) — a slow Redis should be waited
+	// out with go-redis's normal retries, not bailed on quickly.
+	redisClient := redis.NewClient(&redis.Options{Addr: redisAddr})
+	defer redisClient.Close()
+
+	st := store.New(redisClient, store.TTL)
+
+	cons := consumer.New(brokers, st, logger)
+	defer cons.Close()
+
+	go cons.Run(ctx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
@@ -35,14 +57,30 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("Starting health server", "serviceName", serviceName, "port", port)
+		logger.Info("starting server", "service", serviceName, "port", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("Server failed to start", "serviceName", serviceName, "port", port, "err", err)
+			logger.Error("server failed to start", "error", err)
 			os.Exit(1)
 		}
 	}()
 
-	waitForShutdown(srv, logger)
+	<-ctx.Done()
+	logger.Info("shutdown signal received", "service", serviceName)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("graceful shutdown failed", "error", err)
+	}
+
+	logger.Info("shutdown complete", "service", serviceName)
+}
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -51,22 +89,4 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"service": serviceName,
 	})
-}
-
-func waitForShutdown(srv *http.Server, logger *slog.Logger) {
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
-
-	logger.Info("shutdown signal received", "service", serviceName)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		logger.Error("graceful shutdown failed", "error", err)
-		os.Exit(1)
-	}
-
-	logger.Info("shutdown complete", "service", serviceName)
 }
