@@ -224,3 +224,80 @@ stopped, `202 accepted` (not `duplicate`) on the retry after it came back,
 and the row present in Postgres with `decision = 'allow'`. Also re-ran the
 full 1,000-event loadgen proof afterward to confirm no regression: baseline
 2707 → 3607 after the run (delta 900, exact match), zero errors.
+
+---
+
+## Phase 2 Task 2 — Online feature store
+
+### Note: two Redis processes on this machine
+
+Carried over from the Task 1 fail-open test — this machine has both Docker
+compose's `redis` service *and* a separate Homebrew `redis-server` bound to
+port 6379. `localhost:6379` (what every service here connects to) resolves
+to the **Homebrew one**, not the Docker container. So `docker exec
+sentinel-redis redis-cli ...` inspects the wrong instance — use a plain
+`redis-cli -p 6379 ...` from the host instead when checking state written
+by these services.
+
+### Test: feature state accumulates correctly across a user's events
+
+**Steps:** with `stream-processor` running (`PORT=8084` — see port-conflict
+note below) alongside `ingestion`, send a sequence of events for one user:
+
+```bash
+for i in 1 2 3; do
+  curl -s -X POST localhost:8080/v1/events -H "Content-Type: application/json" \
+    -d "{\"event_id\":\"feat_verify_$i\",\"user_id\":\"u_feat_test\",\"amount\":100,\"currency\":\"USD\",\"location\":{\"lat\":12.34,\"lon\":56.78}}"
+done
+
+redis-cli -p 6379 GET sentinel:features:state:u_feat_test
+redis-cli -p 6379 TTL sentinel:features:state:u_feat_test
+```
+
+**Expected:** each `stream-processor` log line shows `velocity_count`
+incrementing (1, 2, 3); the Redis value's `RecentTimestamps` has 3 entries;
+`TTL` is set (~24h).
+
+**Actually run:** log lines showed `velocity_count: 1, 2, 3` across the
+three events, `amount_deviation_ratio: 0` and `distance_from_last_km: 0`
+throughout (same amount and location every time — correctly no deviation).
+Redis held `{"RecentTimestamps":[...3 entries...],"MeanAmount":100,
+"HasMean":true,"LastTimestamp":"...","HasLast":true,"LastLocation":
+{"lat":12.34,"lon":56.78}}`, `TTL` = 86377s (~24h).
+
+### Test: amount deviation, time-since-last, and geo-distance on a real change
+
+**Steps:** send a 4th event for the same user with a different amount and
+location:
+
+```bash
+curl -s -X POST localhost:8080/v1/events -H "Content-Type: application/json" \
+  -d '{"event_id":"feat_verify_4","user_id":"u_feat_test","amount":500,"currency":"USD","location":{"lat":51.5074,"lon":-0.1278}}'
+
+redis-cli -p 6379 GET sentinel:features:state:u_feat_test
+redis-cli -p 6379 TTL sentinel:features:state:u_feat_test
+```
+
+**Expected:** `amount_deviation_ratio` reflects a 400% spike against the
+prior 100 baseline (`(500-100)/100 = 4`); `MeanAmount` updates via EWMA to
+`0.3*500 + 0.7*100 = 220`; `distance_from_last_km` is the real geodesic
+distance between the two points; TTL refreshes back up to ~24h (sliding).
+
+**Actually run:** log line showed `velocity_count: 4, amount_deviation_
+ratio: 4, distance_from_last_km: 6677.216614226916` (arbitrary point →
+London, real-world distance). Redis's `MeanAmount` updated to exactly
+`220`, `LastLocation` updated to the London coordinates, `TTL` refreshed
+to 86398s.
+
+### Bug found while running this: default port collision
+
+`stream-processor`'s `defaultPort` was `8081` — same port Redpanda's
+schema registry is mapped to in `docker-compose.yml`
+(`--schema-registry-addr=0.0.0.0:8081` + `"8081:8081"`). Running
+`stream-processor` against the full compose stack failed immediately with
+`listen tcp :8081: bind: address already in use`. This predates Task 2 —
+it would have broken from Phase 0 onward the first time anyone actually
+ran it locally, since nothing had exercised that path until now.
+`8080`/`8083`/`8081`/`8082`/`8090` are all already taken (ingestion,
+decision-service, and Redpanda's three ports respectively), so
+`defaultPort` was changed to `8084`.
