@@ -301,3 +301,76 @@ ran it locally, since nothing had exercised that path until now.
 `8080`/`8083`/`8081`/`8082`/`8090` are all already taken (ingestion,
 decision-service, and Redpanda's three ports respectively), so
 `defaultPort` was changed to `8084`.
+
+---
+
+## Phase 2 Task 3 — Offline feature replay
+
+### Test: replay reproduces live feature math exactly, against real history
+
+**Steps:** with `ingestion` and `decision-service` running, send a short
+sequence for two users — one with a flat run of same-amount events, one
+with an amount spike that should trip the dummy block rule:
+
+```bash
+curl -s -X POST localhost:8080/v1/events -H "Content-Type: application/json" \
+  -d '{"event_id":"r_u1_1","user_id":"replay_u1","amount":100,"currency":"USD"}'
+# ... r_u1_2 (100), r_u1_3 (900) for replay_u1, ~2s apart
+# ... r_u2_1 (50), r_u2_2 (20000) for replay_u2, ~2s apart
+
+POSTGRES_DSN="postgres://sentinel:sentinel@localhost:5435/sentinel" \
+  OUTPUT_PATH=/tmp/features_dataset.csv ./bin/offline-replay
+```
+
+**Expected:** the CSV's computed columns for these rows match
+`features.Compute`'s formulas exactly, hand-verified against the known
+input sequence — the whole point of reusing `features.Compute` instead of
+reimplementing the math for the batch path.
+
+**Actually run:**
+```
+r_u1_2: velocity_count=2, amount_ewma=100, deviation=0, time_since_last≈2.03s
+r_u1_3: velocity_count=3, amount_ewma=100, deviation=8   (= (900-100)/100)
+r_u2_2: velocity_count=2, amount_ewma=50,  deviation=399 (= (20000-50)/50)
+```
+All exact matches — confirms the offline path reproduces the online path's
+math bit-for-bit given the same inputs.
+
+### Test: full historical replay — no rows lost or duplicated
+
+**Steps:** run `offline-replay` against the full `decisions` table as it
+stood after months of prior testing (loadgen runs, idempotency tests,
+etc. — not a fresh database), then cross-check counts:
+
+```bash
+wc -l /tmp/features_dataset.csv
+docker exec -i sentinel-postgres psql -U sentinel -d sentinel -t -c "select count(*) from decisions;"
+tail -n +2 /tmp/features_dataset.csv | cut -d, -f2 | sort -u | wc -l
+docker exec -i sentinel-postgres psql -U sentinel -d sentinel -t -c "select count(distinct user_id) from decisions;"
+```
+
+**Expected:** CSV data-row count (file line count minus the header) equals
+Postgres's row count exactly; distinct user count matches too.
+
+**Actually run:** Postgres held 3,612 rows across 53 distinct users; the
+CSV had 3,613 lines (3,612 data rows + 1 header) and 53 distinct users in
+its `user_id` column — exact match on both counts.
+
+### Known limitation: this is not a bit-for-bit reproduction of the online path
+
+Two gaps are structural, not bugs, and are a direct consequence of what
+`decisions` actually persists (`event_id, user_id, amount, currency,
+decision, reason, created_at` — see `decision-service/migrations/schema.sql`):
+
+- **Geo-distance can never be recomputed offline.** There is no `location`
+  column in `decisions`, so every replayed `shared.Event` has `Location =
+  nil`. `DistanceFromLastKM`/`HasDistance` are structurally always absent
+  for this path — not a bug, just data that was never persisted past the
+  moment `stream-processor` used it in memory on the live path. The CSV
+  omits these columns entirely rather than emitting meaningless zeros.
+- **Velocity and time-since-last use `created_at` (decision time), not the
+  original event timestamp** — `decisions` doesn't store the latter. In
+  practice these are close (seconds apart, as seen in the test above), but
+  not guaranteed identical — retries or processing lag could widen that
+  gap. This is the first concrete instance of exactly the kind of
+  online/offline divergence Task 4 is meant to document formally.
