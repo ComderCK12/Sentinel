@@ -28,7 +28,7 @@ Three layers: **ingestion** (Go + Kafka) → **stream processing + ML serving** 
 
 - [x] Phase 0 — foundations & local dev environment
 - [x] Phase 1 — core pipeline (ingestion → Kafka → decision, dummy rule, idempotency)
-- [ ] Phase 2 — feature engineering & data layer *(in progress — task 1 of 4)*
+- [x] Phase 2 — feature engineering & data layer (rolling features, online + offline feature stores, online/offline divergence documented)
 - [ ] Phase 3 — ML model training & serving
 - [ ] Phase 4 — model integration with fallback logic
 - [ ] Phase 5 — Kubernetes deployment
@@ -45,9 +45,12 @@ Full task-level breakdown per phase: [`docs/build-plan.md`](docs/build-plan.md).
 git clone https://github.com/<your-username>/sentinel.git
 cd sentinel
 docker compose up -d
-make build
-make test
+go build ./ingestion/... ./decision-service/... ./stream-processor/... ./shared/... ./loadgen/...
+go test ./ingestion/... ./decision-service/... ./stream-processor/... ./shared/... ./loadgen/...
 \`\`\`
+
+Full compile/test/lint/run instructions per service (including required
+tooling and environment variables): [`docs/development.md`](docs/development.md).
 
 ## Project structure
 

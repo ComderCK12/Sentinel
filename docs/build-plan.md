@@ -17,11 +17,11 @@ rolls up the tasks listed here. Status markers: ✅ done, 🔵 in progress,
 - Decision service: consume from Kafka, apply dummy rule, write to Postgres (idempotent via `ON CONFLICT`)
 - Idempotency at ingestion: Redis `SETNX` dedup before publish, with fail-open on Redis outage
 
-## Phase 2 — Feature engineering & data layer 🔵 In progress
-- **Task 1** *(current)*: rolling per-user features — velocity, deviation from historical average, time-since-last, geo-distance
+## Phase 2 — Feature engineering & data layer ✅ Done
+- **Task 1**: rolling per-user features — velocity, deviation from historical average, time-since-last, geo-distance
 - **Task 2**: store features in Redis, keyed by user ID, with TTL — the online feature store
 - **Task 3**: offline batch job recomputing the same features from Postgres history — the training data source
-- **Task 4**: document where online vs offline features diverge
+- **Task 4**: document where online vs offline features diverge — see [`docs/feature-divergence.md`](feature-divergence.md)
 
 ## Phase 3 — ML model training & serving ⬜ Not started
 - Source/generate labeled dataset
