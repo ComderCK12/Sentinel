@@ -8,3 +8,15 @@
 /server
 /worker
 /stream-processor/worker
+
+# Python — venvs, caches, and regenerable training artifacts (the dataset
+# CSV and trained model are build output, reproducible via synth-dataset
+# and train.py with a fixed seed — not source)
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+model-training/.venv/
+model-training/data/
+model-training/artifacts/
+model-serving/.venv/

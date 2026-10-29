@@ -52,11 +52,8 @@ jobs:
           args: --timeout=5m ./decision-service/... ./ingestion/... ./loadgen/... ./shared/... ./stream-processor/...
 
   python:
-    name: Python lint
+    name: Python lint & test
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: model-serving
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -66,10 +63,33 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-          cache-dependency-path: model-serving/requirements.txt
+          cache-dependency-path: |
+            model-serving/requirements.txt
+            model-training/requirements.txt
 
-      - name: Install dependencies
+      - name: Install model-serving dependencies
+        working-directory: model-serving
+        run: pip install -r requirements.txt ruff pytest httpx
+
+      - name: Ruff lint (model-serving)
+        working-directory: model-serving
+        run: ruff check .
+
+      # app/test_main.py's /score tests skip themselves (not fail) when
+      # no trained model is present at MODEL_PATH — CI doesn't run the
+      # Go synth-dataset -> train.py -> convert.py pipeline that would
+      # produce one, so this currently only exercises /health and input
+      # validation here. Still worth running: it catches real regressions
+      # (e.g. a broken startup path) even without a model to score against,
+      # and the full suite runs for real in local development.
+      - name: Pytest (model-serving)
+        working-directory: model-serving
+        run: python3 -m pytest -v
+
+      - name: Install model-training dependencies
+        working-directory: model-training
         run: pip install -r requirements.txt ruff
 
-      - name: Ruff lint
+      - name: Ruff lint (model-training)
+        working-directory: model-training
         run: ruff check .

@@ -374,3 +374,66 @@ decision, reason, created_at` — see `decision-service/migrations/schema.sql`):
   not guaranteed identical — retries or processing lag could widen that
   gap. This is the first concrete instance of exactly the kind of
   online/offline divergence Task 4 is meant to document formally.
+
+---
+
+## Phase 3 Task 4 — Model-serving endpoint
+
+### Test: /score agrees with the model's own feature importances
+
+**Steps:** start the service against the real trained model, then send
+one request shaped like each fraud pattern plus one ordinary request:
+
+```bash
+cd model-serving
+source .venv/bin/activate
+MODEL_PATH=../model-training/artifacts/model.onnx uvicorn app.main:app --port 8085 &
+
+curl -s localhost:8085/health
+
+curl -s -X POST localhost:8085/score -H "Content-Type: application/json" -d '{
+  "amount": 100, "velocity_count": 1, "amount_ewma": 100, "has_amount_baseline": true,
+  "amount_deviation_ratio": 0.0, "time_since_last_seconds": 21600, "has_time_since_last": true,
+  "distance_from_last_km": 2.0, "has_distance": true
+}'
+# ...and the same shape for geo_jump, amount_spike, and velocity_burst —
+# see app/test_main.py for the exact request bodies.
+```
+
+**Expected:** the ordinary-shaped request scores low risk; each of the
+three fraud-pattern-shaped requests scores high risk. This isn't just
+"does it respond" — it's a check that `FEATURE_ORDER` in `main.py`
+actually matches `train.py`'s `FEATURE_COLUMNS`, since a silent ordering
+mismatch would still return a confident-looking score, just for the
+wrong feature.
+
+**Actually run:**
+```
+normal-shaped:         risk_score ≈ 0.000005   is_fraud: false
+geo_jump-shaped:       risk_score ≈ 0.9996     is_fraud: true
+amount_spike-shaped:   risk_score ≈ 0.9998     is_fraud: true
+velocity_burst-shaped: risk_score ≈ 0.9999     is_fraud: true
+```
+All four matched expectations exactly. Malformed/incomplete requests
+(`{"amount": 100}` alone, non-JSON body) correctly returned `422` via
+FastAPI/pydantic validation, not a 500 or a silent wrong prediction.
+
+These four cases are now locked in as `app/test_main.py`'s pytest suite —
+6 tests, run via `python3 -m pytest -v` from `model-serving/`. Verified
+from a completely clean virtualenv (`requirements.txt` plus `pytest`
+and `httpx`), same reproducibility bar as tasks 2 and 3. Also verified
+the tests fail *gracefully*, not loudly, when no trained model is present
+(the `client` fixture calls `pytest.skip`, not an error) — exercised by
+temporarily moving `model.onnx` aside and re-running; all 6 skipped
+cleanly, exit code 0. That's the behavior CI actually sees, since CI
+doesn't run the Go synth-dataset → train.py → convert.py pipeline that
+would produce a model.
+
+### Bug found while wiring this up
+
+Nothing in the ONNX handling this time — the bug was stale FastAPI API
+usage: `@app.on_event("startup")` is deprecated in favor of a `lifespan`
+context manager (FastAPI's own deprecation warning, not a failure).
+Fixed by switching to `@asynccontextmanager` + `lifespan=lifespan` on the
+`FastAPI(...)` constructor, since this is new code and should use current
+best practice rather than ship a known-deprecated pattern.
