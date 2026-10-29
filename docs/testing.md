@@ -475,3 +475,46 @@ through training) is fully reproducible, not just the dataset half.
 columns as native `bool` dtype — so the map produced `NaN` for every row
 (string keys never matched real booleans) and crashed on the int cast.
 Fixed by casting the already-bool columns directly instead.
+
+---
+
+## Phase 3 Task 3 — Export to ONNX
+
+### Test: ONNX export matches the native model on every fraud row
+
+**Steps:**
+```bash
+cd model-training
+source .venv/bin/activate
+python3 convert.py
+```
+
+**Expected:** the exported `.onnx` model's predictions match the native
+XGBoost model's — not on a random sample alone, since fraud is only
+~1.7% of the dataset and a plain random sample could easily miss most of
+it. `convert.py` runs the parity check against *every* fraud row plus a
+random normal sample, specifically because a subtle tree-conversion
+discrepancy would most likely show up on fraud's deeper decision paths.
+
+**Actually run:** 2,676 rows checked (2,176 fraud — all of them — plus
+500 random normal). Predicted labels matched 100%; max probability
+difference 0.00000024 (floating-point noise, not a real divergence).
+Re-verified from a completely clean virtualenv built only from
+`requirements.txt` (not the exploratory venv used during development) —
+identical result, confirming the pipeline doesn't depend on anything
+left over from development.
+
+**Two real bugs found and fixed before this passed:**
+- `onnxmltools`'s `FloatTensorType` and `skl2onnx`'s `FloatTensorType`
+  are different classes despite being structurally identical — passing
+  the `skl2onnx` one into `onnxmltools.convert_xgboost` fails with
+  `RuntimeError: ... got an input ... with a wrong type`. Fixed by
+  importing from `onnxmltools.convert.common.data_types` instead.
+- `train.py` fits the model on a pandas DataFrame, so XGBoost's booster
+  stores the real column names (`"time_since_last_seconds"`, etc.) in its
+  tree dump. `onnxmltools`'s converter only understands XGBoost's default
+  `f0, f1, ...` naming scheme and fails outright on anything else
+  (`Unable to interpret 'time_since_last_seconds', feature names should
+  follow pattern 'f%d'`). Fixed by resetting `feature_names` to the `fN`
+  form (in `FEATURE_COLUMNS`'s order, so it still means the same thing)
+  immediately before conversion.

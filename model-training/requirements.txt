@@ -2,3 +2,5 @@ xgboost==3.4.1
 scikit-learn==1.9.1
 pandas==3.1.0
 numpy==2.5.4
+onnxmltools==1.16.0
+onnxruntime==1.31.1
