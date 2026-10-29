@@ -374,3 +374,104 @@ decision, reason, created_at` — see `decision-service/migrations/schema.sql`):
   not guaranteed identical — retries or processing lag could widen that
   gap. This is the first concrete instance of exactly the kind of
   online/offline divergence Task 4 is meant to document formally.
+
+---
+
+## Phase 3 Task 1 — Synthetic dataset generator
+
+### Test: fraud and normal distance ranges never overlap
+
+**Steps:**
+```bash
+go run ./stream-processor/cmd/synth-dataset -out /tmp/synthetic_dataset.csv
+python3 -c "
+import csv
+rows = list(csv.DictReader(open('/tmp/synthetic_dataset.csv')))
+normal_dist = [float(r['distance_from_last_km']) for r in rows if r['is_fraud']=='false' and float(r['distance_from_last_km'])>1]
+jump_dist = [float(r['distance_from_last_km']) for r in rows if r['fraud_pattern'] in ('geo_jump','combined')]
+jump_time = [float(r['time_since_last_seconds']) for r in rows if r['fraud_pattern'] in ('geo_jump','combined')]
+print('normal nonzero distance max:', max(normal_dist))
+print('geo_jump/combined distance min/max:', min(jump_dist), max(jump_dist))
+print('geo_jump/combined time_since_last max (hours):', max(jump_time)/3600)
+"
+```
+
+**Expected:** normal (non-fraud) location-change distances stay in a
+realistic regional range; every `geo_jump`/`combined` row is both far
+(thousands of km) and fast (minutes, not hours) — genuinely implausible
+travel, not just "far."
+
+**Actually run:** normal nonzero distance topped out at 308km across
+~50k rows; every `geo_jump`/`combined` row was ≥2,253km with a ≤10-minute
+gap (max observed: 6,227km / ~10 min). No overlap between the two
+ranges.
+
+**Bugs found and fixed before this passed** (see
+`stream-processor/internal/synth/synth_test.go` for the regression
+tests that now lock these in):
+- `geo_jump`'s incoming time gap was inherited from whatever the prior
+  *normal* event's gap happened to be (median ~4 hours in an early run),
+  not a deliberately short one — so "impossible travel" wasn't reliably
+  impossible. Fixed by having every event generator compute its own gap
+  forward from the last event's timestamp, instead of chaining through a
+  clock value that earlier code had already advanced for a different
+  reason.
+- The event immediately after a `geo_jump` snapped back to the home
+  location via the ordinary normal-event generator — which produced the
+  exact same huge-distance-over-short-gap signal as the fraud event
+  itself, but labeled `is_fraud: false`. Fixed by making the away-and-return
+  trip one continuous two-event fraud episode, both ends labeled.
+- Separately, `alt` (secondary) locations were drawn from the same
+  globally-random distribution as `home`, so ordinary location switches
+  could read up to 19,736km — directly overlapping `geo_jump`'s range.
+  Fixed by bounding `alt` to a realistic regional offset from `home`.
+
+---
+
+## Phase 3 Task 2 — Train XGBoost on the synthetic dataset
+
+### Test: training produces a model that learns behavioral signal, not just amount
+
+**Steps:**
+```bash
+go run ./stream-processor/cmd/synth-dataset -users 5000 -min-events 10 -max-events 40 \
+  -fraud-rate 0.15 -seed 42 -out model-training/data/synthetic_dataset.csv
+
+cd model-training
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python3 train.py
+```
+
+**Expected:** strong but not suspicious separation on held-out data
+(class imbalance here is real — ~1.7% fraud — so accuracy alone would be
+meaningless); feature importances spread across more than one feature,
+confirming the model isn't just re-deriving a single-field threshold.
+
+**Actually run:** 125,837 rows (2,176 fraud, ~1.7%), stratified 80/20
+split. Held-out test set: precision 0.62 / recall 0.98 / F1 0.76 on the
+fraud class, ROC-AUC 0.9993, PR-AUC 0.9706. Confusion matrix caught
+426/435 fraud rows, 9 missed, 266 false positives out of 24,733 normal
+rows. Feature importances: `time_since_last_seconds` 0.71 (the shared
+signal across velocity-burst, geo-jump, and combined patterns — all
+three involve short gaps), `amount_deviation_ratio` 0.16,
+`distance_from_last_km` 0.06, `velocity_count` 0.06 — a real multivariate
+split, not one dominant feature. The three `has_*` baseline-presence
+flags contributed ~0 importance, which is expected and correct given this
+dataset's own construction: fraud is never injected before
+`minNormalBeforeFraud` (3) prior events, so those flags are always `true`
+by the time fraud could occur — they'd carry real signal against data
+where fraud could appear on a user's very first event, which this
+synthetic generator deliberately avoids (see Task 1, "no baseline to
+deviate from").
+
+Re-ran with the same seed via a second output path: `metrics.json`
+byte-for-byte identical — confirms the whole pipeline (dataset generation
+through training) is fully reproducible, not just the dataset half.
+
+**Bug found and fixed before this ran:** `train.py`'s CSV loader
+`.map()`'d boolean columns assuming they arrived as the strings
+`"true"`/`"false"`, but pandas' `read_csv` already auto-infers true/false
+columns as native `bool` dtype — so the map produced `NaN` for every row
+(string keys never matched real booleans) and crashed on the int cast.
+Fixed by casting the already-bool columns directly instead.
